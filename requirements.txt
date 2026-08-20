@@ -1,4 +1,7 @@
+setuptools<81
+setuptools<81
 # --- core ---
+setuptools<81
 flask==3.0.3
 gunicorn==22.0.0
 xgboost==2.1.4
