@@ -1,0 +1,60 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  test:
+    name: Lint & Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run tests
+        run: pytest -v
+
+  build:
+    name: Build Docker image
+    needs: test          # only build if tests pass
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t demand-forecast-api:${{ github.sha }} .
+
+      # ---- OPTIONAL: push to AWS ECR + deploy to App Runner ----
+      # Uncomment and add repo secrets (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)
+      # to enable automatic deployment on every push to main.
+      #
+      # - name: Configure AWS credentials
+      #   uses: aws-actions/configure-aws-credentials@v4
+      #   with:
+      #     aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      #     aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      #     aws-region: us-east-1
+      #
+      # - name: Login to Amazon ECR
+      #   id: ecr
+      #   uses: aws-actions/amazon-ecr-login@v2
+      #
+      # - name: Push image to ECR
+      #   env:
+      #     REGISTRY: ${{ steps.ecr.outputs.registry }}
+      #   run: |
+      #     docker tag demand-forecast-api:${{ github.sha }} $REGISTRY/demand-forecast-api:latest
+      #     docker push $REGISTRY/demand-forecast-api:latest
+      #     # App Runner auto-deploys when the :latest image updates

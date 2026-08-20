@@ -1,0 +1,13 @@
+# --- core ---
+flask==3.0.3
+gunicorn==22.0.0
+xgboost==2.1.4
+pandas==2.2.2
+numpy==1.26.4
+scikit-learn==1.5.1
+requests==2.32.3
+
+# --- MLOps additions ---
+mlflow==2.15.1           # experiment tracking + model registry
+evidently==0.4.30        # data drift + performance monitoring
+pytest==8.3.2            # testing

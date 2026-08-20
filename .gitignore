@@ -1,0 +1,13 @@
+env/
+.venv/
+mlruns/
+__pycache__/
+*.pyc
+data/
+.DS_Store
+.idea/
+*.pkl
+xgb_flask_api/
+mlops_upgrade.zip
+mlops_upgrade/
+.ipynb_checkpoints/
