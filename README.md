@@ -1,36 +1,42 @@
-# Large-Scale Product Demand Forecasting with XGBoost
+# Large-Scale Product Demand Forecasting with XGBoost — End-to-End MLOps
 
-An **end-to-end retail demand forecasting system** built on the M5 (Walmart) dataset — covering data preprocessing, leak-free time-series feature engineering, model training, time-aware hyperparameter tuning, anomaly detection, and deployment as a **Flask REST API** with Docker.
+![CI](https://github.com/Gopikaskumar18/xgb_flask_api/actions/workflows/ci.yml/badge.svg)
+
+An **end-to-end retail demand forecasting system** on the M5 (Walmart) dataset, taken from a notebook model all the way to a **tested, tracked, continuously-integrated, and monitored** ML service.
 
 **Headline result: test RMSE of 1.92 on a held-out 28-day window — a 26% improvement over a naive baseline.**
+
+This project covers the full ML lifecycle:
+data preprocessing → leak-free feature engineering → time-aware tuning → evaluation against a baseline → **MLflow experiment tracking** → **pytest test suite** → **CI/CD with GitHub Actions** → **Evidently drift monitoring** → Flask API + Docker.
 
 ---
 
 ## Table of Contents
 
-1. [Project Overview](#project-overview)
+1. [Problem & Approach](#problem--approach)
 2. [Dataset](#dataset)
 3. [Feature Engineering](#feature-engineering)
-4. [Modeling Approach](#modeling-approach)
-5. [Hyperparameter Tuning](#hyperparameter-tuning)
-6. [Evaluation](#evaluation)
-7. [Trend & Anomaly Analysis](#trend--anomaly-analysis)
-8. [Deployment](#deployment)
-9. [Project Structure](#project-structure)
-10. [Installation & Setup](#installation--setup)
-11. [API Usage](#api-usage)
-12. [Future Work](#future-work)
+4. [Modeling & Evaluation](#modeling--evaluation)
+5. [MLOps: Experiment Tracking (MLflow)](#mlops-experiment-tracking-mlflow)
+6. [MLOps: Testing (pytest)](#mlops-testing-pytest)
+7. [MLOps: CI/CD (GitHub Actions)](#mlops-cicd-github-actions)
+8. [MLOps: Drift Monitoring (Evidently)](#mlops-drift-monitoring-evidently)
+9. [Deployment (Flask + Docker)](#deployment-flask--docker)
+10. [Project Structure](#project-structure)
+11. [Setup & Usage](#setup--usage)
+12. [Results Summary](#results-summary)
+13. [Future Work](#future-work)
 
 ---
 
-## Project Overview
+## Problem & Approach
 
-Retailers lose money two ways: overstocking ties up capital and creates waste, while stockouts mean lost sales. Accurate demand forecasting sits at the center of inventory and supply-chain decisions.
+Retailers lose money two ways: overstock ties up working capital and drives markdowns, while stockouts lose sales and customers. Accurate SKU-level demand forecasting drives inventory and replenishment decisions.
 
-This project predicts **daily units sold for each product-store combination**.
+This project predicts **daily units sold per product-store**.
 
 - **Problem type:** Regression
-- **Algorithm:** XGBoost Regressor (`reg:squarederror`)
+- **Algorithm:** XGBoost Regressor (`reg:squarederror`, `tree_method="hist"`)
 - **Evaluation:** RMSE on a chronologically held-out test set, benchmarked against a naive baseline
 
 ---
@@ -42,30 +48,30 @@ Based on the **M5 Forecasting Competition** dataset (Walmart, via Kaggle):
 - **3,049 products** across **10 stores** in **3 US states** (CA, TX, WI)
 - Categories: Foods, Hobbies, Household
 - **Daily sales** from 2011-01-29 to 2016-04-24 (1,913 days)
-- Three source tables: **sales** (wide format), **calendar** (dates, events, SNAP flags), and **prices** (weekly)
+- Three tables: **sales** (wide), **calendar** (dates, events, SNAP flags), **prices** (weekly)
 
-**Preprocessing:** the wide sales table is melted to long format (one row per item-store-day, ~58M rows), then joined to the calendar on the day index and to prices on store + item + week.
+**Preprocessing:** the wide sales table is melted to long format (~58M rows), then joined to the calendar on the day index and to prices on store + item + week.
 
-**Training sample:** a random 300-product sample spanning all categories and stores (fixed seed for reproducibility), keeping the pipeline tractable on commodity hardware.
+**Training sample:** a reproducible random sample of products across all categories and stores (fixed seed), keeping the pipeline tractable on commodity hardware.
 
 ---
 
 ## Feature Engineering
 
-The core of the project. All history-based features are built **leak-free** — they only ever look backward.
+All history-based features are **leak-free** — they only ever look backward.
 
 | Group | Features | Purpose |
 |---|---|---|
-| **Time** | `d`, `wday`, `month`, `year`, `day_of_week`, `is_weekend` | Trend, weekly and seasonal patterns |
-| **Events** | `event_name_1/2`, `event_type_1/2`, `is_holiday` | Holiday and sporting-event demand spikes |
+| **Time** | `d`, `wday`, `month`, `year`, `day_of_week`, `is_weekend` | Trend, weekly & seasonal patterns |
+| **Events** | `event_name_1/2`, `event_type_1/2`, `is_holiday` | Holiday & sporting-event demand spikes |
 | **SNAP** | `snap_CA`, `snap_TX`, `snap_WI` | Food-assistance benefit days lift grocery demand |
 | **Price** | `sell_price`, `price_lag_7`, `price_change_7` | Price level and promotion/elasticity effects |
-| **Lag** | `lag_7`, `lag_28` | Sales 7 and 28 days ago (weekly / monthly memory) |
+| **Lag** | `lag_7`, `lag_28` | Sales 7 & 28 days ago (weekly / monthly memory) |
 | **Rolling** | `rolling_mean_7`, `rolling_mean_28`, `rolling_std_28` | Recent demand level and volatility |
 
 ### Preventing target leakage
 
-Rolling features are computed as:
+Rolling features are built with a shift so the window ends *yesterday*:
 
 ```python
 df["rolling_mean_7"] = (
@@ -74,20 +80,13 @@ df["rolling_mean_7"] = (
 )
 ```
 
-The `.shift(1)` **before** `.rolling()` ensures the window ends *yesterday* — the current day's sales never leak into its own feature. Without it, validation scores look artificially strong and the model collapses in production.
-
-Categorical encoding and median imputation are both fit on the **training set only**; unseen categories map to `-1`.
+The `.shift(1)` **before** `.rolling()` ensures the current day's sales never leak into its own feature. Categorical encoding and median imputation are both fit on the **training set only**; unseen categories map to `-1`.
 
 ---
 
-## Modeling Approach
-
-- **Model:** XGBoost Regressor, `reg:squarederror`, `tree_method='hist'`
-- **Why XGBoost:** state of the art on tabular mixed-type data, captures feature interactions automatically, handles missing values natively, and trains one *global* model across all series (unlike ARIMA, which fits each series separately)
+## Modeling & Evaluation
 
 ### Chronological 3-way split
-
-Time-series data cannot be shuffled, so the split is strictly by date:
 
 ```
 2011 ────────────────────────────────► 2016-04-24
@@ -96,68 +95,111 @@ Time-series data cannot be shuffled, so the split is strictly by date:
                             (tuning)  (scored once)
 ```
 
-The **test set is untouched** during training and tuning — it is scored exactly once, at the end. 28 days matches the M5 forecast horizon.
+The **test set is untouched** during training and tuning — scored exactly once. 28 days matches the M5 forecast horizon.
 
----
+### Time-aware tuning
 
-## Hyperparameter Tuning
+Hyperparameters are tuned with `RandomizedSearchCV` using **`TimeSeriesSplit`**, so every fold trains on earlier data and validates on later — no future data leaks backward.
 
-- **Tool:** `RandomizedSearchCV`
-- **Cross-validation:** **`TimeSeriesSplit`** — every fold trains on earlier data and validates on later data, so no future information leaks backward (standard k-fold would)
-- **Scoring:** RMSE
-- **Early stopping:** training halts when validation RMSE stops improving
+**Best parameters:** 200 trees, `max_depth=4`, `learning_rate=0.05`, `subsample=0.8`, `colsample_bytree=0.7`, `min_child_weight=1`, `gamma=0.1`.
 
-**Best parameters found:**
-
-| Parameter | Value |
-|---|---|
-| `n_estimators` | 200 |
-| `max_depth` | 4 |
-| `learning_rate` | 0.05 |
-| `subsample` | 0.8 |
-| `colsample_bytree` | 0.7 |
-| `min_child_weight` | 1 |
-| `gamma` | 0.1 |
-
-Shallow trees with a low learning rate plus row/column subsampling form a deliberately regularized configuration that resists overfitting.
-
----
-
-## Evaluation
-
-Scored once on the untouched test set, and benchmarked against a **naive baseline** (predict the same as 7 days ago) — the bar any forecast must clear to justify its complexity.
+### Baseline comparison
 
 | Metric | Value |
 |---|---|
 | **Model test RMSE** | **1.92** |
-| Naive baseline RMSE | 2.61 |
+| Naive baseline (predict last week) RMSE | 2.61 |
 | **Improvement over baseline** | **26.4%** |
 
-**Overfitting check:** early stopping halted training around round 124 of 200, and the test RMSE matched the validation curve — train and unseen performance agree.
+Early stopping halted training at ~round 99–124 of 200, and the test RMSE matched the validation curve — evidence of no overfitting.
 
 ---
 
-## Trend & Anomaly Analysis
+## MLOps: Experiment Tracking (MLflow)
 
-Beyond forecasting, the pipeline surfaces operational risk signals:
+Every training run logs its parameters, metrics, and the model artifact to MLflow, so configurations can be compared objectively instead of by eyeballing notebook output.
 
-- **Trend analysis:** aggregate daily sales with a 28-day rolling average to show demand level and direction
-- **Anomaly detection:** per-series rolling z-score; any day more than 3 standard deviations from a product's recent norm is flagged
+`train.py` logs `test_rmse`, `naive_baseline_rmse`, `improvement_over_baseline_pct`, `best_iteration`, and all hyperparameters, then registers the model with `mlflow.xgboost.log_model`.
 
-**Result:** ~2.1% of item-days flagged as demand anomalies, plus a ranked list of the most volatile products for stakeholder review.
+![MLflow experiment runs](s1.png)
+*The `demand-forecasting` experiment tracking multiple runs, each logged from `train.py` with the XGBoost model attached.*
+
+![MLflow run comparison](s2.png)
+*Comparing two runs side by side. Here the hyperparameters (`max_depth`, `learning_rate`) stayed identical across runs while the training sample size changed, so MLflow makes it clear the performance difference came from data scale, not model config.*
+
+Run the UI with:
+```bash
+mlflow ui --port 5001   # http://127.0.0.1:5001
+```
 
 ---
 
-## Deployment
+## MLOps: Testing (pytest)
 
-- **Framework:** Flask
-- **Endpoint:** `POST /predict`
-- **Input:** JSON object of feature values
-- **Output:** predicted demand in JSON
+A pytest suite guards the pipeline — most importantly against reintroducing **feature leakage**.
 
-The API loads three artifacts saved at training time — the model (`final_xgb_model.json`), the label encoders, and the feature medians — so **serving stays consistent with training**: incoming categories are encoded with the exact training mappings, and missing features are filled with training medians. This eliminates train/serve skew.
+| Test | What it protects |
+|---|---|
+| `test_rolling_mean_excludes_current_day` | **Leakage guard** — fails if the rolling window ever includes today's sales |
+| `test_lag_7_is_seven_days_back` | Lag correctness |
+| `test_no_cross_series_leakage` | Lags don't bleed between products |
+| `test_is_weekend_flag` | Calendar feature correctness |
+| `test_health`, `test_predict_returns_number`, `test_predict_missing_features_key` | API behavior |
 
-**Docker** packages the app, dependencies, and model artifacts so it runs identically in any environment.
+![pytest passing](s3.png)
+*All 7 tests passing, including the leakage regression test.*
+
+Run with:
+```bash
+pytest -v
+```
+
+---
+
+## MLOps: CI/CD (GitHub Actions)
+
+On every push, GitHub Actions runs the test suite and then builds the Docker image — tests gate the build, so broken code never ships.
+
+![CI/CD passing](s4.png)
+*The CI/CD workflow running automatically on push: Lint & Test, then Build Docker image, both green.*
+
+Workflow file: [`.github/workflows/ci.yml`](.github/workflows/ci.yml)
+
+---
+
+## MLOps: Drift Monitoring (Evidently)
+
+`train.py` saves a reference sample of the training data. `monitoring/drift_report.py` compares incoming (production) data against that reference using **Evidently**, produces an HTML report, and applies a **retraining-trigger rule**: if more than 30% of features drift, the script exits non-zero so a scheduler can kick off retraining.
+
+```
+Drifted features: 2/23 (share=0.09)
+Report saved to monitoring/drift_report.html
+[OK] Drift within tolerance. No retraining needed.
+```
+
+Run with:
+```bash
+python monitoring/drift_report.py
+# or against real production data:
+python monitoring/drift_report.py --current data/recent_production.csv
+```
+
+---
+
+## Deployment (Flask + Docker)
+
+- **Framework:** Flask, served with Gunicorn
+- **Endpoint:** `POST /predict` (plus a `/health` check for load balancers)
+- **Consistency:** the API loads the model, label encoders, and feature medians saved at training time, so incoming requests are encoded and imputed exactly as in training — no train/serve skew
+
+The `Dockerfile` packages the app, dependencies, and model artifacts to run identically anywhere.
+
+```bash
+docker build -t demand-forecast-api .
+docker run -p 8080:8080 demand-forecast-api
+```
+
+> **Note on cloud deployment:** the API is container-ready for AWS App Runner / ECR (with a `/health` check and `benchmark.py` for p95 latency measurement). Cloud deployment is documented but not kept running to avoid ongoing costs.
 
 ---
 
@@ -165,98 +207,81 @@ The API loads three artifacts saved at training time — the model (`final_xgb_m
 
 ```
 xgb_flask_api/
-├── notebooks/
-│   ├── Data_Exploration.ipynb      # load, melt, merge, clean
-│   └── Modeling.ipynb              # features, split, tune, train, evaluate
-├── app.py                          # Flask API
-├── test_request.py                 # API test script
-├── streamlit_app.py                # Streamlit UI
-├── final_xgb_model.json            # trained model (native XGBoost format)
-├── label_encoders.pkl              # categorical mappings from training
-├── feature_medians.pkl             # imputation values from training
+├── train.py                     # Training + MLflow logging
+├── app.py                       # Flask API (/predict, /health)
+├── benchmark.py                 # p50/p95/p99 latency measurement
 ├── requirements.txt
 ├── Dockerfile
-└── README.md
+├── pytest.ini
+├── tests/
+│   ├── test_features.py         # leakage + feature-logic tests
+│   └── test_api.py              # endpoint tests
+├── monitoring/
+│   ├── drift_report.py          # Evidently drift + retrain trigger
+│   └── reference_data.csv       # training reference (auto-created)
+├── notebooks/
+│   ├── Data_Exploration.ipynb
+│   └── Modeling.ipynb
+├── .github/workflows/ci.yml     # CI/CD pipeline
+├── final_xgb_model.json         # trained model (native format)
+├── label_encoders.pkl           # categorical mappings from training
+└── feature_medians.pkl          # imputation values from training
 ```
 
 ---
 
-## Installation & Setup
+## Setup & Usage
 
 ```bash
-# Clone the repository
+# Clone
 git clone https://github.com/Gopikaskumar18/xgb_flask_api.git
 cd xgb_flask_api
 
-# Install dependencies
+# Install (setuptools<81 provides pkg_resources for MLflow)
 pip install -r requirements.txt
 
-# Run the API
-python app.py
+# Train (logs to MLflow, saves model + artifacts)
+python train.py
+
+# View experiments
+mlflow ui --port 5001
+
+# Run tests
+pytest -v
+
+# Check drift
+python monitoring/drift_report.py
+
+# Serve the API
+python app.py            # http://127.0.0.1:8080
+python test_request.py   # send a sample request
 ```
 
-The API starts at `http://127.0.0.1:5000`.
-
-> **macOS note:** port 5000 is used by AirPlay Receiver. Either disable it in
-> System Settings → General → AirDrop & Handoff, or change the port in `app.py`.
-
-### Run with Docker
-
-```bash
-docker build -t demand-forecast-api .
-docker run -p 5000:5000 demand-forecast-api
-```
+> **macOS note:** port 5000 is used by AirPlay Receiver; the API uses 8080 and MLflow uses 5001 to avoid conflicts.
 
 ---
 
-## API Usage
+## Results Summary
 
-**Request:**
-
-```bash
-curl -X POST http://127.0.0.1:5000/predict \
-  -H "Content-Type: application/json" \
-  -d '{
-    "features": {
-      "d": 1900, "wday": 1, "month": 4, "year": 2016,
-      "event_name_1": "No Event", "event_type_1": "No Event",
-      "event_name_2": "No Event", "event_type_2": "No Event",
-      "snap_CA": 1, "snap_TX": 0, "snap_WI": 0,
-      "day_of_week": 1, "is_weekend": 1, "is_holiday": 0,
-      "sell_price": 5.30, "price_lag_7": 5.10, "price_change_7": 0.20,
-      "lag_7": 3, "lag_28": 2,
-      "rolling_mean_7": 2.5, "rolling_mean_28": 2.1, "rolling_std_28": 1.2
-    }
-  }'
-```
-
-**Response:**
-
-```json
-{
-  "predicted_demand": 1.83,
-  "predicted_units": 2
-}
-```
-
-Event fields accept **raw string values** — the API encodes them using the saved training mappings. Any omitted feature is filled with its training median.
-
-Or run the included test script:
-
-```bash
-python test_request.py
-```
+| Area | Result |
+|---|---|
+| **Model** | Test RMSE **1.92**, **26% better** than naive baseline, no overfitting |
+| **Tracking** | MLflow logging every run's params, metrics & model; run comparison |
+| **Testing** | 7 pytest tests passing, including a feature-leakage regression guard |
+| **CI/CD** | GitHub Actions runs tests + builds Docker image on every push (green) |
+| **Monitoring** | Evidently drift report + automated retraining trigger (>30% drift) |
+| **Serving** | Flask `/predict` API, `/health` check, Docker-packaged |
 
 ---
 
 ## Future Work
 
-- **Scale to the full dataset** — train on all 30,490 series rather than a 300-product sample
-- **Add WRMSSE**, the M5 competition metric, to weight items by sales volume
-- **Multi-step forecasting** — extend beyond single-day prediction using a recursive approach (feeding predictions back to build future lags) or direct per-horizon models
-- **Handle intermittent demand** explicitly with a Tweedie objective or a two-stage (will-it-sell → how-much) model
-- **Richer features** — additional rolling windows, price relative to category, days since last sale, and event lead/lag effects
-- **Production hardening** — Gunicorn, request validation, logging, monitoring, and batch prediction support
+- Scale training to the full M5 catalog (all 30,490 series)
+- Add WRMSSE (the M5 competition metric) to weight items by sales volume
+- Multi-step forecasting (recursive or direct per-horizon models)
+- Handle intermittent demand with a Tweedie objective or two-stage model
+- Deploy to AWS App Runner with a live endpoint and p95 latency SLO
+- Schedule the drift check (e.g. a weekly GitHub Actions cron) to auto-trigger retraining
 
 ---
 
